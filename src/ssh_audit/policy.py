@@ -406,6 +406,11 @@ macs = %s
                              (not self._allow_larger_keys and actual_ca_key_size != expected_ca_key_size):
                             ret = False
                             self._append_error('CA signature size (%s)' % actual_ca_key_type, [str(expected_ca_key_size)], None, [str(actual_ca_key_size)])
+                else:
+                    # The target did not offer this host key type, so its required host key/CA sizes cannot be observed.  Fail closed, unless the policy lists it as an optional host key.
+                    if self._optional_host_keys is None or hostkey_type not in self._optional_host_keys:
+                        ret = False
+                        self._append_error('Host key (%s) sizes' % hostkey_type, [str(expected_hostkey_size)], None, ['{undefined}'])
 
         # Check key exchanges.
         if self._kex is not None:
@@ -466,6 +471,10 @@ macs = %s
                        (not self._allow_larger_keys and actual_dh_modulus_size != expected_dh_modulus_size):
                         ret = False
                         self._append_error('Group exchange (%s) modulus sizes' % dh_modulus_type, [str(expected_dh_modulus_size)], None, [str(actual_dh_modulus_size)])
+                else:
+                    # The target did not offer this group exchange algorithm, so its required modulus size cannot be observed.  Fail closed.
+                    ret = False
+                    self._append_error('Group exchange (%s) modulus sizes' % dh_modulus_type, [str(expected_dh_modulus_size)], None, ['{undefined}'])
 
         error_list, error_str = self._get_errors()
         return ret, error_list, error_str

@@ -38,6 +38,17 @@ class TestPolicy:
         return self.ssh2_kex.parse(self.OutputBuffer, w.write_flush())
 
 
+    def _get_kex_with_host_keys(self):
+        '''Returns an SSH2.Kex object that also includes host key, CA signature, and DH modulus size information.'''
+
+        kex = self._get_kex()
+        kex.set_host_key('ssh-ed25519', b'fake_ed25519_hostkey', 256, '', 0)
+        kex.set_host_key('rsa-sha2-256', b'fake_rsa_hostkey', 3072, '', 0)
+        kex.set_host_key('ssh-ed25519-cert-v01@openssh.com', b'fake_ed25519_cert', 256, 'ssh-ed25519', 256)
+        kex.set_dh_modulus_size('diffie-hellman-group-exchange-sha256', 3072)
+        return kex
+
+
     def test_builtin_policy_consistency(self):
         '''Ensure that the BUILTIN_POLICIES struct is consistent.'''
 
@@ -538,3 +549,159 @@ macs = mac_alg2, mac_alg1, mac_alg3, mac_alg0'''
         assert ret is False
         assert len(errors) == 1
         assert error_str.find("Key exchanges did not match.") != -1
+
+
+    def test_policy_evaluate_sizes_passing_1(self):
+        '''Ensure that a policy with host key, CA, and DH modulus sizes passes when the target offers all of them with matching sizes.'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+host_key_sizes = {"ssh-ed25519": {"hostkey_size": 256}, "rsa-sha2-256": {"hostkey_size": 3072}, "ssh-ed25519-cert-v01@openssh.com": {"hostkey_size": 256, "ca_key_type": "ssh-ed25519", "ca_key_size": 256}}
+dh_modulus_sizes = {"diffie-hellman-group-exchange-sha256": 3072}'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex_with_host_keys())
+        assert ret is True
+        assert len(errors) == 0
+        assert error_str == ""
+
+
+    def test_policy_evaluate_missing_hostkey_failing_1(self):
+        '''Ensure that a policy that only specifies host_key_sizes fails closed when the target does not offer those host keys (new syntax).'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+host_key_sizes = {"ssh-ed25519": {"hostkey_size": 256}}'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0]['mismatched_field'] == 'Host key (ssh-ed25519) sizes'
+        assert errors[0]['expected_required'] == ['256']
+        assert errors[0]['actual'] == ['{undefined}']
+        assert error_str.find('Host key (ssh-ed25519) sizes did not match.') != -1
+
+
+    def test_policy_evaluate_missing_hostkey_failing_2(self):
+        '''Ensure that a policy that only specifies hostkey_size_* fails closed when the target does not offer those host keys (deprecated syntax).'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+hostkey_size_ssh-ed25519 = 256'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0]['mismatched_field'] == 'Host key (ssh-ed25519) sizes'
+        assert errors[0]['actual'] == ['{undefined}']
+        assert error_str.find('Host key (ssh-ed25519) sizes did not match.') != -1
+
+
+    def test_policy_evaluate_missing_cakey_failing_1(self):
+        '''Ensure that a policy that specifies a CA signature fails closed when the target does not offer the certificate host key (new syntax).'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+host_key_sizes = {"ssh-ed25519-cert-v01@openssh.com": {"hostkey_size": 256, "ca_key_type": "ssh-ed25519", "ca_key_size": 256}}'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0]['mismatched_field'] == 'Host key (ssh-ed25519-cert-v01@openssh.com) sizes'
+        assert errors[0]['actual'] == ['{undefined}']
+        assert error_str.find('Host key (ssh-ed25519-cert-v01@openssh.com) sizes did not match.') != -1
+
+
+    def test_policy_evaluate_missing_cakey_failing_2(self):
+        '''Ensure that a policy that specifies a CA signature fails closed when the target does not offer the certificate host key (deprecated syntax).'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+hostkey_size_ssh-ed25519-cert-v01@openssh.com = 256
+cakey_size_ssh-ed25519-cert-v01@openssh.com = 256'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0]['mismatched_field'] == 'Host key (ssh-ed25519-cert-v01@openssh.com) sizes'
+        assert errors[0]['actual'] == ['{undefined}']
+        assert error_str.find('Host key (ssh-ed25519-cert-v01@openssh.com) sizes did not match.') != -1
+
+
+    def test_policy_evaluate_missing_optional_hostkey_passing_1(self):
+        '''Ensure that a host key listed as optional may be absent from the target, even when its size is specified in the policy.'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+optional host keys = ssh-ed25519-cert-v01@openssh.com
+host_key_sizes = {"ssh-ed25519": {"hostkey_size": 256}, "ssh-ed25519-cert-v01@openssh.com": {"hostkey_size": 256, "ca_key_type": "ssh-ed25519", "ca_key_size": 256}}'''
+        policy = self.Policy(policy_data=policy_data)
+
+        # The target offers ssh-ed25519, but not the optional certificate host key.
+        kex = self._get_kex()
+        kex.set_host_key('ssh-ed25519', b'fake_ed25519_hostkey', 256, '', 0)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', kex)
+        assert ret is True
+        assert len(errors) == 0
+        assert error_str == ""
+
+
+    def test_policy_evaluate_missing_dh_modulus_failing_1(self):
+        '''Ensure that a policy that only specifies dh_modulus_sizes fails closed when the target does not offer that group exchange algorithm (new syntax).'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+dh_modulus_sizes = {"diffie-hellman-group-exchange-sha256": 3072}'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0]['mismatched_field'] == 'Group exchange (diffie-hellman-group-exchange-sha256) modulus sizes'
+        assert errors[0]['expected_required'] == ['3072']
+        assert errors[0]['actual'] == ['{undefined}']
+        assert error_str.find('Group exchange (diffie-hellman-group-exchange-sha256) modulus sizes did not match.') != -1
+
+
+    def test_policy_evaluate_missing_dh_modulus_failing_2(self):
+        '''Ensure that a policy that only specifies dh_modulus_size_* fails closed when the target does not offer that group exchange algorithm (deprecated syntax).'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+dh_modulus_size_diffie-hellman-group-exchange-sha256 = 3072'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0]['mismatched_field'] == 'Group exchange (diffie-hellman-group-exchange-sha256) modulus sizes'
+        assert errors[0]['actual'] == ['{undefined}']
+        assert error_str.find('Group exchange (diffie-hellman-group-exchange-sha256) modulus sizes did not match.') != -1
+
+
+    def test_policy_evaluate_larger_keys_passing_1(self):
+        '''Ensure that allow_larger_keys still permits host keys, CA keys, and DH moduli larger than the policy requires.'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+allow_larger_keys = true
+host_key_sizes = {"ssh-ed25519": {"hostkey_size": 256}, "rsa-sha2-256": {"hostkey_size": 2048}, "ssh-ed25519-cert-v01@openssh.com": {"hostkey_size": 256, "ca_key_type": "ssh-ed25519", "ca_key_size": 256}}
+dh_modulus_sizes = {"diffie-hellman-group-exchange-sha256": 2048}'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex_with_host_keys())
+        assert ret is True
+        assert len(errors) == 0
+        assert error_str == ""
+
+
+    def test_policy_evaluate_larger_keys_missing_failing_1(self):
+        '''Ensure that allow_larger_keys does not waive the requirement that configured key sizes be observed on the target.'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+allow_larger_keys = true
+host_key_sizes = {"ssh-ed25519": {"hostkey_size": 256}}
+dh_modulus_sizes = {"diffie-hellman-group-exchange-sha256": 2048}'''
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors, error_str = policy.evaluate('SSH Server 1.0', self._get_kex())
+        assert ret is False
+        assert len(errors) == 2
+        assert error_str.find('Host key (ssh-ed25519) sizes did not match.') != -1
+        assert error_str.find('Group exchange (diffie-hellman-group-exchange-sha256) modulus sizes did not match.') != -1
